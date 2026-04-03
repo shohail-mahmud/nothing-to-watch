@@ -202,6 +202,11 @@ function Index() {
       >
         ← Back
       </button>
+
+      {/* TMDB Attribution */}
+      <div className="fixed bottom-3 right-3 text-neutral-700 text-[10px] z-40">
+        TMDB
+      </div>
     </div>
   );
 }
