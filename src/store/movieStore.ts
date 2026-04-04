@@ -104,8 +104,15 @@ export const useMovieStore = create<MovieStore>((set, get) => ({
         if (allMovies.length >= count) break;
       }
 
+      // Shuffle for random order each time
+      const shuffled = allMovies.slice(0, count);
+      for (let k = shuffled.length - 1; k > 0; k--) {
+        const j = Math.floor(Math.random() * (k + 1));
+        [shuffled[k], shuffled[j]] = [shuffled[j], shuffled[k]];
+      }
+
       set({
-        movies: allMovies.slice(0, count),
+        movies: shuffled,
         isLoading: false,
         loadingProgress: 100,
         loadedCount: Math.min(allMovies.length, count),
