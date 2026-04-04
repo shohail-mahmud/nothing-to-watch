@@ -8,49 +8,92 @@ interface MovieNode {
   size: number;
 }
 
+interface Transform {
+  x: number;
+  y: number;
+  scale: number;
+}
+
 const MoviePoster = memo(({ node, onClick, onMouseEnter, onMouseLeave }: {
   node: MovieNode;
   onClick: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
-}) => {
-  return (
-    <div
-      className="absolute"
-      style={{
-        left: node.x,
-        top: node.y,
-        width: node.size,
-        height: node.size * 1.5,
-      }}
-      onClick={onClick}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      <img
-        src={getImageUrl(node.movie.poster_path, 'w200')}
-        alt=""
-        className="w-full h-full object-cover rounded-sm pointer-events-none"
-        loading="lazy"
-        draggable={false}
-      />
-    </div>
-  );
-}, (prevProps, nextProps) => prevProps.node.movie.id === nextProps.node.movie.id);
+}) => (
+  <div
+    className="absolute"
+    style={{
+      left: node.x,
+      top: node.y,
+      width: node.size,
+      height: node.size * 1.5,
+    }}
+    onClick={onClick}
+    onMouseEnter={onMouseEnter}
+    onMouseLeave={onMouseLeave}
+  >
+    <img
+      src={getImageUrl(node.movie.poster_path, 'w200')}
+      alt=""
+      className="w-full h-full object-cover rounded-sm pointer-events-none"
+      loading="lazy"
+      draggable={false}
+    />
+  </div>
+), (prev, next) => prev.node.movie.id === next.node.movie.id);
 
 MoviePoster.displayName = 'MoviePoster';
+
+const HoverPanel = memo(({ movie, mousePos, genres }: {
+  movie: Movie;
+  mousePos: { x: number; y: number };
+  genres: Record<number, string>;
+}) => (
+  <div
+    className="fixed z-50 pointer-events-none"
+    style={{
+      left: Math.min(mousePos.x + 12, window.innerWidth - 260),
+      top: Math.min(mousePos.y + 12, window.innerHeight - 150),
+    }}
+  >
+    <div className="bg-neutral-900/95 border border-neutral-800 text-white p-2.5 rounded-lg w-56">
+      <h3 className="font-medium text-xs mb-1 truncate">{movie.title}</h3>
+      <div className="text-[10px] text-neutral-500 mb-1.5">
+        {movie.release_date?.split('-')[0] || 'N/A'} • ★ {movie.vote_average?.toFixed(1) || 'N/A'}
+      </div>
+      {movie.genre_ids && movie.genre_ids.length > 0 && (
+        <div className="flex gap-1 flex-wrap mb-1.5">
+          {movie.genre_ids.slice(0, 2).map((gid) => {
+            const name = genres[gid];
+            return name ? (
+              <span key={gid} className="px-1 py-0.5 bg-neutral-800 rounded text-[9px] text-neutral-400">
+                {name}
+              </span>
+            ) : null;
+          })}
+        </div>
+      )}
+      {movie.overview && (
+        <p className="text-[10px] text-neutral-400 line-clamp-2">{movie.overview}</p>
+      )}
+    </div>
+  </div>
+));
+
+HoverPanel.displayName = 'HoverPanel';
 
 const VoronoiCanvas = () => {
   const { movies, setSelectedMovie, genres } = useMovieStore();
   const containerRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const transformRef = useRef<Transform>({ x: 0, y: 0, scale: 0.8 });
+  const [visibleNodes, setVisibleNodes] = useState<MovieNode[]>([]);
   const [hoveredMovie, setHoveredMovie] = useState<Movie | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
-  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 0.8 });
-  const [isDragging, setIsDragging] = useState(false);
+  const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragDistance = useRef(0);
-  const [visibleRange, setVisibleRange] = useState({ startRow: 0, endRow: 100, startCol: 0, endCol: 100 });
-  const rafId = useRef<number | null>(null);
+  const lastTouchDist = useRef(0);
 
   const posterWidth = 90;
   const posterHeight = posterWidth * 1.5;
@@ -59,231 +102,120 @@ const VoronoiCanvas = () => {
   const gridInfo = useMemo(() => {
     const columns = Math.ceil(Math.sqrt(movies.length * 1.5));
     const rows = Math.ceil(movies.length / columns);
-    const gridWidth = columns * (posterWidth + gap);
-    const gridHeight = rows * (posterHeight + gap);
-    return { columns, rows, gridWidth, gridHeight };
+    return { columns, rows, gridWidth: columns * (posterWidth + gap), gridHeight: rows * (posterHeight + gap) };
   }, [movies.length]);
 
   const nodes = useMemo(() => {
-    if (movies.length === 0) return [];
-    const { columns } = gridInfo;
-    return movies.map((movie, i) => {
-      const col = i % columns;
-      const row = Math.floor(i / columns);
-      return {
-        movie,
-        x: col * (posterWidth + gap),
-        y: row * (posterHeight + gap),
-        size: posterWidth,
-      };
-    });
+    return movies.map((movie, i) => ({
+      movie,
+      x: (i % gridInfo.columns) * (posterWidth + gap),
+      y: Math.floor(i / gridInfo.columns) * (posterHeight + gap),
+      size: posterWidth,
+    }));
   }, [movies, gridInfo]);
 
-  useEffect(() => {
-    if (nodes.length === 0 || !containerRef.current) return;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const initialX = (containerWidth - gridInfo.gridWidth * 0.8) / 2;
-    const initialY = (containerHeight - gridInfo.gridHeight * 0.8) / 2;
-    setTransform({ x: initialX, y: initialY, scale: 0.8 });
-  }, [nodes.length, gridInfo]);
-
-  const updateVisibleRange = useCallback(() => {
-    if (!containerRef.current || nodes.length === 0) return;
-    const { columns } = gridInfo;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const cellWidth = posterWidth + gap;
-    const cellHeight = posterHeight + gap;
-    const worldLeft = -transform.x / transform.scale;
-    const worldTop = -transform.y / transform.scale;
-    const worldRight = (containerWidth - transform.x) / transform.scale;
-    const worldBottom = (containerHeight - transform.y) / transform.scale;
-    const buffer = 2;
-    const startCol = Math.max(0, Math.floor(worldLeft / cellWidth) - buffer);
-    const endCol = Math.min(columns, Math.ceil(worldRight / cellWidth) + buffer);
-    const startRow = Math.max(0, Math.floor(worldTop / cellHeight) - buffer);
-    const endRow = Math.min(gridInfo.rows, Math.ceil(worldBottom / cellHeight) + buffer);
-    setVisibleRange({ startRow, endRow, startCol, endCol });
-  }, [transform, gridInfo, nodes.length]);
-
-  useEffect(() => {
-    if (rafId.current) cancelAnimationFrame(rafId.current);
-    rafId.current = requestAnimationFrame(() => updateVisibleRange());
-    return () => { if (rafId.current) cancelAnimationFrame(rafId.current); };
-  }, [updateVisibleRange]);
-
-  const visibleNodes = useMemo(() => {
-    if (nodes.length === 0) return [];
-    const { columns } = gridInfo;
-    const result: MovieNode[] = [];
-    for (let row = visibleRange.startRow; row < visibleRange.endRow; row++) {
-      for (let col = visibleRange.startCol; col < visibleRange.endCol; col++) {
-        const index = row * columns + col;
-        if (index < nodes.length) result.push(nodes[index]);
+  const updateView = useCallback(() => {
+    if (!containerRef.current || !innerRef.current) return;
+    const t = transformRef.current;
+    innerRef.current.style.transform = `translate3d(${t.x}px, ${t.y}px, 0) scale(${t.scale})`;
+    
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
+    const cellW = posterWidth + gap;
+    const cellH = posterHeight + gap;
+    const wl = -t.x / t.scale;
+    const wt = -t.y / t.scale;
+    const wr = (cw - t.x) / t.scale;
+    const wb = (ch - t.y) / t.scale;
+    const buf = 2;
+    
+    const sc = Math.max(0, Math.floor(wl / cellW) - buf);
+    const ec = Math.min(gridInfo.columns, Math.ceil(wr / cellW) + buf);
+    const sr = Math.max(0, Math.floor(wt / cellH) - buf);
+    const er = Math.min(gridInfo.rows, Math.ceil(wb / cellH) + buf);
+    
+    const visible: MovieNode[] = [];
+    for (let r = sr; r < er; r++) {
+      for (let c = sc; c < ec; c++) {
+        const idx = r * gridInfo.columns + c;
+        if (idx < nodes.length) visible.push(nodes[idx]);
       }
     }
-    return result;
-  }, [nodes, gridInfo, visibleRange]);
+    setVisibleNodes(visible);
+  }, [nodes, gridInfo]);
 
-  const constrainTransform = useCallback((x: number, y: number, scale: number) => {
-    if (nodes.length === 0 || !containerRef.current) return { x, y };
-    const scaledGridWidth = gridInfo.gridWidth * scale;
-    const scaledGridHeight = gridInfo.gridHeight * scale;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const minX = Math.min(0, containerWidth - scaledGridWidth);
-    const maxX = Math.max(0, containerWidth - scaledGridWidth);
-    const minY = Math.min(0, containerHeight - scaledGridHeight);
-    const maxY = Math.max(0, containerHeight - scaledGridHeight);
+  const constrain = (x: number, y: number, scale: number) => {
+    if (!containerRef.current) return { x, y };
+    const sw = gridInfo.gridWidth * scale;
+    const sh = gridInfo.gridHeight * scale;
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
     return {
-      x: Math.max(minX, Math.min(maxX, x)),
-      y: Math.max(minY, Math.min(maxY, y)),
+      x: Math.max(Math.min(0, cw - sw), Math.min(Math.max(0, cw - sw), x)),
+      y: Math.max(Math.min(0, ch - sh), Math.min(Math.max(0, ch - sh), y)),
     };
-  }, [nodes.length, gridInfo]);
+  };
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    setIsDragging(true);
-    dragStart.current = { x: e.clientX - transform.x, y: e.clientY - transform.y };
+  const handlePointerDown = (e: React.PointerEvent) => {
+    isDragging.current = true;
+    dragStart.current = { x: e.clientX - transformRef.current.x, y: e.clientY - transformRef.current.y };
     dragDistance.current = 0;
-  }, [transform]);
+  };
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+  const handlePointerMove = (e: React.PointerEvent) => {
     setMousePos({ x: e.clientX, y: e.clientY });
-    if (isDragging) {
-      const newX = e.clientX - dragStart.current.x;
-      const newY = e.clientY - dragStart.current.y;
-      dragDistance.current += Math.abs(newX - transform.x) + Math.abs(newY - transform.y);
-      const constrained = constrainTransform(newX, newY, transform.scale);
-      setTransform(prev => ({ ...prev, x: constrained.x, y: constrained.y }));
-    }
-  }, [isDragging, transform, constrainTransform]);
+    if (!isDragging.current) return;
+    const newX = e.clientX - dragStart.current.x;
+    const newY = e.clientY - dragStart.current.y;
+    dragDistance.current += Math.abs(newX - transformRef.current.x) + Math.abs(newY - transformRef.current.y);
+    const constrained = constrain(newX, newY, transformRef.current.scale);
+    transformRef.current = { ...transformRef.current, ...constrained };
+    updateView();
+  };
 
-  const handleMouseUp = useCallback(() => setIsDragging(false), []);
+  const handlePointerUp = () => { isDragging.current = false; };
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.max(0.2, Math.min(4, transform.scale * delta));
-    if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const worldX = (mouseX - transform.x) / transform.scale;
-      const worldY = (mouseY - transform.y) / transform.scale;
-      const newX = mouseX - worldX * newScale;
-      const newY = mouseY - worldY * newScale;
-      const constrained = constrainTransform(newX, newY, newScale);
-      setTransform({ x: constrained.x, y: constrained.y, scale: newScale });
-    }
-  }, [transform, constrainTransform]);
+    const newScale = Math.max(0.2, Math.min(4, transformRef.current.scale * delta));
+    const rect = containerRef.current!.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const worldX = (mouseX - transformRef.current.x) / transformRef.current.scale;
+    const worldY = (mouseY - transformRef.current.y) / transformRef.current.scale;
+    const newX = mouseX - worldX * newScale;
+    const newY = mouseY - worldY * newScale;
+    transformRef.current = { ...constrain(newX, newY, newScale), scale: newScale };
+    updateView();
+  };
 
-  const handleZoom = useCallback((direction: 'in' | 'out') => {
-    const delta = direction === 'in' ? 1.4 : 0.6;
-    const newScale = Math.max(0.2, Math.min(4, transform.scale * delta));
-    if (containerRef.current) {
-      const centerX = containerRef.current.clientWidth / 2;
-      const centerY = containerRef.current.clientHeight / 2;
-      const worldX = (centerX - transform.x) / transform.scale;
-      const worldY = (centerY - transform.y) / transform.scale;
-      const newX = centerX - worldX * newScale;
-      const newY = centerY - worldY * newScale;
-      const constrained = constrainTransform(newX, newY, newScale);
-      setTransform({ x: constrained.x, y: constrained.y, scale: newScale });
-    }
-  }, [transform, constrainTransform]);
-
-  const handlePosterClick = useCallback((movie: Movie) => {
-    if (dragDistance.current < 10) setSelectedMovie(movie);
-  }, [setSelectedMovie]);
+  useEffect(() => { updateView(); }, [updateView]);
 
   return (
-    <>
-      <div
-        ref={containerRef}
-        className="fixed inset-0 overflow-hidden select-none"
-        style={{ background: '#0a0a0a', cursor: isDragging ? 'grabbing' : 'grab' }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={() => { setIsDragging(false); setHoveredMovie(null); }}
-        onWheel={handleWheel}
-      >
-        <div
-          style={{
-            transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
-            transformOrigin: '0 0',
-            position: 'absolute',
-            width: gridInfo.gridWidth,
-            height: gridInfo.gridHeight,
-            willChange: 'transform',
-          }}
-        >
-          {visibleNodes.map((node) => (
-            <MoviePoster
-              key={node.movie.id}
-              node={node}
-              onClick={() => handlePosterClick(node.movie)}
-              onMouseEnter={() => setHoveredMovie(node.movie)}
-              onMouseLeave={() => setHoveredMovie(null)}
-            />
-          ))}
-        </div>
-
-        {/* Zoom Controls */}
-        <div className="fixed top-3 right-3 flex flex-col gap-1.5 z-50">
-          <button
-            onClick={() => handleZoom('in')}
-            className="bg-neutral-900/90 border border-neutral-800 hover:border-neutral-700 text-neutral-400 hover:text-white w-8 h-8 rounded-lg flex items-center justify-center transition-all"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-          </button>
-          <button
-            onClick={() => handleZoom('out')}
-            className="bg-neutral-900/90 border border-neutral-800 hover:border-neutral-700 text-neutral-400 hover:text-white w-8 h-8 rounded-lg flex items-center justify-center transition-all"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
-            </svg>
-          </button>
-        </div>
+    <div
+      ref={containerRef}
+      className="fixed inset-0 overflow-hidden touch-none"
+      style={{ background: '#0a0a0a', cursor: isDragging.current ? 'grabbing' : 'grab' }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={handlePointerUp}
+      onWheel={handleWheel}
+    >
+      <div ref={innerRef} style={{ transformOrigin: '0 0', position: 'absolute', width: gridInfo.gridWidth, height: gridInfo.gridHeight }}>
+        {visibleNodes.map((node) => (
+          <MoviePoster
+            key={node.movie.id}
+            node={node}
+            onClick={() => { if (dragDistance.current < 10) setSelectedMovie(node.movie); }}
+            onMouseEnter={() => setHoveredMovie(node.movie)}
+            onMouseLeave={() => setHoveredMovie(null)}
+          />
+        ))}
       </div>
-
-      {/* Hover Info Panel */}
-      {hoveredMovie && (
-        <div
-          className="fixed z-50 pointer-events-none"
-          style={{
-            left: Math.min(mousePos.x + 12, window.innerWidth - 260),
-            top: Math.min(mousePos.y + 12, window.innerHeight - 150),
-          }}
-        >
-          <div className="bg-neutral-900/95 border border-neutral-800 text-white p-2.5 rounded-lg w-56">
-            <h3 className="font-medium text-xs mb-1 truncate">{hoveredMovie.title}</h3>
-            <div className="text-[10px] text-neutral-500 mb-1.5">
-              {hoveredMovie.release_date?.split('-')[0] || 'N/A'} • ★ {hoveredMovie.vote_average?.toFixed(1) || 'N/A'}
-            </div>
-            {hoveredMovie.genre_ids && hoveredMovie.genre_ids.length > 0 && (
-              <div className="flex gap-1 flex-wrap mb-1.5">
-                {hoveredMovie.genre_ids.slice(0, 2).map((genreId) => {
-                  const genreName = genres[genreId];
-                  return genreName ? (
-                    <span key={genreId} className="px-1 py-0.5 bg-neutral-800 rounded text-[9px] text-neutral-400">
-                      {genreName}
-                    </span>
-                  ) : null;
-                })}
-              </div>
-            )}
-            {hoveredMovie.overview && (
-              <p className="text-[10px] text-neutral-400 line-clamp-2">{hoveredMovie.overview}</p>
-            )}
-          </div>
-        </div>
-      )}
-    </>
+      {hoveredMovie && <HoverPanel movie={hoveredMovie} mousePos={mousePos} genres={genres} />}
+    </div>
   );
 };
 
