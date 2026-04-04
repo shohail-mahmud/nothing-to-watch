@@ -8,190 +8,289 @@ interface MovieNode {
   size: number;
 }
 
+const posterWidth = 90;
+const posterHeight = posterWidth * 1.5;
+const gap = 2;
+
 const MoviePoster = memo(({ node, onClick, onMouseEnter, onMouseLeave }: {
   node: MovieNode;
   onClick: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
-}) => {
-  return (
-    <div
-      className="absolute"
-      style={{
-        left: node.x,
-        top: node.y,
-        width: node.size,
-        height: node.size * 1.5,
-      }}
-      onClick={onClick}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      <img
-        src={getImageUrl(node.movie.poster_path, 'w200')}
-        alt=""
-        className="w-full h-full object-cover rounded-sm pointer-events-none"
-        loading="lazy"
-        draggable={false}
-      />
-    </div>
-  );
-}, (prevProps, nextProps) => prevProps.node.movie.id === nextProps.node.movie.id);
+}) => (
+  <div
+    className="absolute"
+    style={{
+      left: node.x,
+      top: node.y,
+      width: node.size,
+      height: node.size * 1.5,
+    }}
+    onClick={onClick}
+    onMouseEnter={onMouseEnter}
+    onMouseLeave={onMouseLeave}
+  >
+    <img
+      src={getImageUrl(node.movie.poster_path, 'w200')}
+      alt=""
+      className="w-full h-full object-cover rounded-sm pointer-events-none"
+      loading="lazy"
+      draggable={false}
+    />
+  </div>
+), (prev, next) => prev.node.movie.id === next.node.movie.id);
 
 MoviePoster.displayName = 'MoviePoster';
 
 const VoronoiCanvas = () => {
   const { movies, setSelectedMovie, genres } = useMovieStore();
   const containerRef = useRef<HTMLDivElement>(null);
-  const [hoveredMovie, setHoveredMovie] = useState<Movie | null>(null);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
-  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 0.8 });
-  const [isDragging, setIsDragging] = useState(false);
+  const innerRef = useRef<HTMLDivElement>(null);
+
+  // Use refs for transform to avoid re-renders on every pan/zoom frame
+  const transformRef = useRef({ x: 0, y: 0, scale: 0.8 });
+  const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragDistance = useRef(0);
-  const [visibleRange, setVisibleRange] = useState({ startRow: 0, endRow: 100, startCol: 0, endCol: 100 });
-  const rafId = useRef<number | null>(null);
+  const lastTouchDist = useRef(0);
+  const lastTouchCenter = useRef({ x: 0, y: 0 });
+  const isTouching = useRef(false);
 
-  const posterWidth = 90;
-  const posterHeight = posterWidth * 1.5;
-  const gap = 2;
+  const [visibleNodes, setVisibleNodes] = useState<MovieNode[]>([]);
+  const [hoveredMovie, setHoveredMovie] = useState<Movie | null>(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [cursorStyle, setCursorStyle] = useState('grab');
+
+  const updateQueued = useRef(false);
 
   const gridInfo = useMemo(() => {
     const columns = Math.ceil(Math.sqrt(movies.length * 1.5));
     const rows = Math.ceil(movies.length / columns);
-    const gridWidth = columns * (posterWidth + gap);
-    const gridHeight = rows * (posterHeight + gap);
-    return { columns, rows, gridWidth, gridHeight };
+    return { columns, rows, gridWidth: columns * (posterWidth + gap), gridHeight: rows * (posterHeight + gap) };
   }, [movies.length]);
 
   const nodes = useMemo(() => {
     if (movies.length === 0) return [];
     const { columns } = gridInfo;
-    return movies.map((movie, i) => {
-      const col = i % columns;
-      const row = Math.floor(i / columns);
-      return {
-        movie,
-        x: col * (posterWidth + gap),
-        y: row * (posterHeight + gap),
-        size: posterWidth,
-      };
-    });
+    return movies.map((movie, i) => ({
+      movie,
+      x: (i % columns) * (posterWidth + gap),
+      y: Math.floor(i / columns) * (posterHeight + gap),
+      size: posterWidth,
+    }));
   }, [movies, gridInfo]);
 
-  useEffect(() => {
-    if (nodes.length === 0 || !containerRef.current) return;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const initialX = (containerWidth - gridInfo.gridWidth * 0.8) / 2;
-    const initialY = (containerHeight - gridInfo.gridHeight * 0.8) / 2;
-    setTransform({ x: initialX, y: initialY, scale: 0.8 });
-  }, [nodes.length, gridInfo]);
-
-  const updateVisibleRange = useCallback(() => {
-    if (!containerRef.current || nodes.length === 0) return;
-    const { columns } = gridInfo;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const cellWidth = posterWidth + gap;
-    const cellHeight = posterHeight + gap;
-    const worldLeft = -transform.x / transform.scale;
-    const worldTop = -transform.y / transform.scale;
-    const worldRight = (containerWidth - transform.x) / transform.scale;
-    const worldBottom = (containerHeight - transform.y) / transform.scale;
-    const buffer = 2;
-    const startCol = Math.max(0, Math.floor(worldLeft / cellWidth) - buffer);
-    const endCol = Math.min(columns, Math.ceil(worldRight / cellWidth) + buffer);
-    const startRow = Math.max(0, Math.floor(worldTop / cellHeight) - buffer);
-    const endRow = Math.min(gridInfo.rows, Math.ceil(worldBottom / cellHeight) + buffer);
-    setVisibleRange({ startRow, endRow, startCol, endCol });
-  }, [transform, gridInfo, nodes.length]);
-
-  useEffect(() => {
-    if (rafId.current) cancelAnimationFrame(rafId.current);
-    rafId.current = requestAnimationFrame(() => updateVisibleRange());
-    return () => { if (rafId.current) cancelAnimationFrame(rafId.current); };
-  }, [updateVisibleRange]);
-
-  const visibleNodes = useMemo(() => {
-    if (nodes.length === 0) return [];
-    const { columns } = gridInfo;
-    const result: MovieNode[] = [];
-    for (let row = visibleRange.startRow; row < visibleRange.endRow; row++) {
-      for (let col = visibleRange.startCol; col < visibleRange.endCol; col++) {
-        const index = row * columns + col;
-        if (index < nodes.length) result.push(nodes[index]);
-      }
-    }
-    return result;
-  }, [nodes, gridInfo, visibleRange]);
+  const applyTransform = useCallback(() => {
+    if (!innerRef.current) return;
+    const t = transformRef.current;
+    innerRef.current.style.transform = `translate3d(${t.x}px, ${t.y}px, 0) scale(${t.scale})`;
+  }, []);
 
   const constrainTransform = useCallback((x: number, y: number, scale: number) => {
     if (nodes.length === 0 || !containerRef.current) return { x, y };
-    const scaledGridWidth = gridInfo.gridWidth * scale;
-    const scaledGridHeight = gridInfo.gridHeight * scale;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const minX = Math.min(0, containerWidth - scaledGridWidth);
-    const maxX = Math.max(0, containerWidth - scaledGridWidth);
-    const minY = Math.min(0, containerHeight - scaledGridHeight);
-    const maxY = Math.max(0, containerHeight - scaledGridHeight);
+    const sw = gridInfo.gridWidth * scale;
+    const sh = gridInfo.gridHeight * scale;
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
     return {
-      x: Math.max(minX, Math.min(maxX, x)),
-      y: Math.max(minY, Math.min(maxY, y)),
+      x: Math.max(Math.min(0, cw - sw), Math.min(Math.max(0, cw - sw), x)),
+      y: Math.max(Math.min(0, ch - sh), Math.min(Math.max(0, ch - sh), y)),
     };
   }, [nodes.length, gridInfo]);
 
+  const scheduleVisibleUpdate = useCallback(() => {
+    if (updateQueued.current) return;
+    updateQueued.current = true;
+    requestAnimationFrame(() => {
+      updateQueued.current = false;
+      if (!containerRef.current || nodes.length === 0) return;
+      const { columns, rows } = gridInfo;
+      const t = transformRef.current;
+      const cw = containerRef.current.clientWidth;
+      const ch = containerRef.current.clientHeight;
+      const cellW = posterWidth + gap;
+      const cellH = posterHeight + gap;
+      const wl = -t.x / t.scale;
+      const wt = -t.y / t.scale;
+      const wr = (cw - t.x) / t.scale;
+      const wb = (ch - t.y) / t.scale;
+      const buf = 2;
+      const sc = Math.max(0, Math.floor(wl / cellW) - buf);
+      const ec = Math.min(columns, Math.ceil(wr / cellW) + buf);
+      const sr = Math.max(0, Math.floor(wt / cellH) - buf);
+      const er = Math.min(rows, Math.ceil(wb / cellH) + buf);
+      const result: MovieNode[] = [];
+      for (let r = sr; r < er; r++) {
+        for (let c = sc; c < ec; c++) {
+          const idx = r * columns + c;
+          if (idx < nodes.length) result.push(nodes[idx]);
+        }
+      }
+      setVisibleNodes(result);
+    });
+  }, [nodes, gridInfo]);
+
+  // Initial position
+  useEffect(() => {
+    if (nodes.length === 0 || !containerRef.current) return;
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
+    const initialX = (cw - gridInfo.gridWidth * 0.8) / 2;
+    const initialY = (ch - gridInfo.gridHeight * 0.8) / 2;
+    transformRef.current = { x: initialX, y: initialY, scale: 0.8 };
+    applyTransform();
+    scheduleVisibleUpdate();
+  }, [nodes.length, gridInfo, applyTransform, scheduleVisibleUpdate]);
+
+  // --- Mouse handlers ---
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    setIsDragging(true);
-    dragStart.current = { x: e.clientX - transform.x, y: e.clientY - transform.y };
+    isDragging.current = true;
+    dragStart.current = { x: e.clientX - transformRef.current.x, y: e.clientY - transformRef.current.y };
     dragDistance.current = 0;
-  }, [transform]);
+    setCursorStyle('grabbing');
+  }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     setMousePos({ x: e.clientX, y: e.clientY });
-    if (isDragging) {
-      const newX = e.clientX - dragStart.current.x;
-      const newY = e.clientY - dragStart.current.y;
-      dragDistance.current += Math.abs(newX - transform.x) + Math.abs(newY - transform.y);
-      const constrained = constrainTransform(newX, newY, transform.scale);
-      setTransform(prev => ({ ...prev, x: constrained.x, y: constrained.y }));
-    }
-  }, [isDragging, transform, constrainTransform]);
+    if (!isDragging.current) return;
+    const t = transformRef.current;
+    const newX = e.clientX - dragStart.current.x;
+    const newY = e.clientY - dragStart.current.y;
+    dragDistance.current += Math.abs(newX - t.x) + Math.abs(newY - t.y);
+    const c = constrainTransform(newX, newY, t.scale);
+    transformRef.current = { ...t, x: c.x, y: c.y };
+    applyTransform();
+    scheduleVisibleUpdate();
+  }, [constrainTransform, applyTransform, scheduleVisibleUpdate]);
 
-  const handleMouseUp = useCallback(() => setIsDragging(false), []);
+  const handleMouseUp = useCallback(() => {
+    isDragging.current = false;
+    setCursorStyle('grab');
+  }, []);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
+    const t = transformRef.current;
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.max(0.2, Math.min(4, transform.scale * delta));
+    const newScale = Math.max(0.2, Math.min(4, t.scale * delta));
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const worldX = (mouseX - transform.x) / transform.scale;
-      const worldY = (mouseY - transform.y) / transform.scale;
-      const newX = mouseX - worldX * newScale;
-      const newY = mouseY - worldY * newScale;
-      const constrained = constrainTransform(newX, newY, newScale);
-      setTransform({ x: constrained.x, y: constrained.y, scale: newScale });
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const wx = (mx - t.x) / t.scale;
+      const wy = (my - t.y) / t.scale;
+      const c = constrainTransform(mx - wx * newScale, my - wy * newScale, newScale);
+      transformRef.current = { x: c.x, y: c.y, scale: newScale };
+      applyTransform();
+      scheduleVisibleUpdate();
     }
-  }, [transform, constrainTransform]);
+  }, [constrainTransform, applyTransform, scheduleVisibleUpdate]);
+
+  // Attach wheel with passive:false
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
+
+  // --- Touch handlers ---
+  const getTouchDist = (touches: React.TouchList | TouchList) => {
+    if (touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  const getTouchCenter = (touches: React.TouchList | TouchList) => {
+    if (touches.length < 2) return { x: touches[0].clientX, y: touches[0].clientY };
+    return {
+      x: (touches[0].clientX + touches[1].clientX) / 2,
+      y: (touches[0].clientY + touches[1].clientY) / 2,
+    };
+  };
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    isTouching.current = true;
+    dragDistance.current = 0;
+    if (e.touches.length === 1) {
+      dragStart.current = {
+        x: e.touches[0].clientX - transformRef.current.x,
+        y: e.touches[0].clientY - transformRef.current.y,
+      };
+    } else if (e.touches.length === 2) {
+      lastTouchDist.current = getTouchDist(e.touches);
+      lastTouchCenter.current = getTouchCenter(e.touches);
+    }
+  }, []);
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    const t = transformRef.current;
+
+    if (e.touches.length === 1) {
+      const newX = e.touches[0].clientX - dragStart.current.x;
+      const newY = e.touches[0].clientY - dragStart.current.y;
+      dragDistance.current += Math.abs(newX - t.x) + Math.abs(newY - t.y);
+      const c = constrainTransform(newX, newY, t.scale);
+      transformRef.current = { ...t, x: c.x, y: c.y };
+    } else if (e.touches.length === 2) {
+      const dist = getTouchDist(e.touches);
+      const center = getTouchCenter(e.touches);
+
+      if (lastTouchDist.current > 0) {
+        const scaleFactor = dist / lastTouchDist.current;
+        const newScale = Math.max(0.2, Math.min(4, t.scale * scaleFactor));
+
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const cx = center.x - rect.left;
+          const cy = center.y - rect.top;
+          const wx = (cx - t.x) / t.scale;
+          const wy = (cy - t.y) / t.scale;
+          const panX = center.x - lastTouchCenter.current.x;
+          const panY = center.y - lastTouchCenter.current.y;
+          const c = constrainTransform(cx - wx * newScale + panX, cy - wy * newScale + panY, newScale);
+          transformRef.current = { x: c.x, y: c.y, scale: newScale };
+        }
+      }
+      lastTouchDist.current = dist;
+      lastTouchCenter.current = center;
+    }
+
+    applyTransform();
+    scheduleVisibleUpdate();
+  }, [constrainTransform, applyTransform, scheduleVisibleUpdate]);
+
+  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length === 0) {
+      isTouching.current = false;
+      lastTouchDist.current = 0;
+    } else if (e.touches.length === 1) {
+      dragStart.current = {
+        x: e.touches[0].clientX - transformRef.current.x,
+        y: e.touches[0].clientY - transformRef.current.y,
+      };
+      lastTouchDist.current = 0;
+    }
+  }, []);
 
   const handleZoom = useCallback((direction: 'in' | 'out') => {
+    const t = transformRef.current;
     const delta = direction === 'in' ? 1.4 : 0.6;
-    const newScale = Math.max(0.2, Math.min(4, transform.scale * delta));
+    const newScale = Math.max(0.2, Math.min(4, t.scale * delta));
     if (containerRef.current) {
-      const centerX = containerRef.current.clientWidth / 2;
-      const centerY = containerRef.current.clientHeight / 2;
-      const worldX = (centerX - transform.x) / transform.scale;
-      const worldY = (centerY - transform.y) / transform.scale;
-      const newX = centerX - worldX * newScale;
-      const newY = centerY - worldY * newScale;
-      const constrained = constrainTransform(newX, newY, newScale);
-      setTransform({ x: constrained.x, y: constrained.y, scale: newScale });
+      const cx = containerRef.current.clientWidth / 2;
+      const cy = containerRef.current.clientHeight / 2;
+      const wx = (cx - t.x) / t.scale;
+      const wy = (cy - t.y) / t.scale;
+      const c = constrainTransform(cx - wx * newScale, cy - wy * newScale, newScale);
+      transformRef.current = { x: c.x, y: c.y, scale: newScale };
+      applyTransform();
+      scheduleVisibleUpdate();
     }
-  }, [transform, constrainTransform]);
+  }, [constrainTransform, applyTransform, scheduleVisibleUpdate]);
 
   const handlePosterClick = useCallback((movie: Movie) => {
     if (dragDistance.current < 10) setSelectedMovie(movie);
@@ -201,17 +300,19 @@ const VoronoiCanvas = () => {
     <>
       <div
         ref={containerRef}
-        className="fixed inset-0 overflow-hidden select-none"
-        style={{ background: '#0a0a0a', cursor: isDragging ? 'grabbing' : 'grab' }}
+        className="fixed inset-0 overflow-hidden select-none touch-none"
+        style={{ background: '#0a0a0a', cursor: cursorStyle }}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        onMouseLeave={() => { setIsDragging(false); setHoveredMovie(null); }}
-        onWheel={handleWheel}
+        onMouseLeave={() => { isDragging.current = false; setCursorStyle('grab'); setHoveredMovie(null); }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
       >
         <div
+          ref={innerRef}
           style={{
-            transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
             transformOrigin: '0 0',
             position: 'absolute',
             width: gridInfo.gridWidth,
@@ -251,10 +352,10 @@ const VoronoiCanvas = () => {
         </div>
       </div>
 
-      {/* Hover Info Panel */}
+      {/* Hover Info - desktop only */}
       {hoveredMovie && (
         <div
-          className="fixed z-50 pointer-events-none"
+          className="fixed z-50 pointer-events-none hidden md:block"
           style={{
             left: Math.min(mousePos.x + 12, window.innerWidth - 260),
             top: Math.min(mousePos.y + 12, window.innerHeight - 150),
@@ -267,11 +368,11 @@ const VoronoiCanvas = () => {
             </div>
             {hoveredMovie.genre_ids && hoveredMovie.genre_ids.length > 0 && (
               <div className="flex gap-1 flex-wrap mb-1.5">
-                {hoveredMovie.genre_ids.slice(0, 2).map((genreId) => {
-                  const genreName = genres[genreId];
-                  return genreName ? (
-                    <span key={genreId} className="px-1 py-0.5 bg-neutral-800 rounded text-[9px] text-neutral-400">
-                      {genreName}
+                {hoveredMovie.genre_ids.slice(0, 2).map((gid) => {
+                  const name = genres[gid];
+                  return name ? (
+                    <span key={gid} className="px-1 py-0.5 bg-neutral-800 rounded text-[9px] text-neutral-400">
+                      {name}
                     </span>
                   ) : null;
                 })}
